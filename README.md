@@ -1,5 +1,10 @@
 # Training Architect — Lux Nova Training
 
+**Live app:** https://sailorsailorsailor.github.io/training-architect/
+
+To publish updates: commit changes, then
+`git subtree split --prefix public -b gh-pages --rejoin && git push origin gh-pages --force && git push`
+
 Generates a complete, literature-grounded corporate training package from a topic selection and a duration:
 
 1. **Training schedule** — timed agenda (modules, breaks, lunch) built around an input → practice → debrief structure
