@@ -33,10 +33,6 @@ function init() {
     document.querySelectorAll('.duration').forEach(b => b.classList.toggle('selected', b === btn));
   }));
 
-  // Custom-topic literature scan needs a Claude API key (stored locally only)
-  const savedKey = localStorage.getItem('anthropic_api_key') || '';
-  $('#api-key').value = savedKey;
-
   $('#generate').addEventListener('click', generate);
   document.querySelectorAll('.tab').forEach(tab => tab.addEventListener('click', () => showTab(tab.dataset.tab)));
   document.querySelectorAll('[data-export]').forEach(btn => btn.addEventListener('click', () => doExport(btn.dataset.export)));
@@ -50,14 +46,12 @@ function showTab(name) {
 async function generate() {
   const topicIds = [...document.querySelectorAll('.topic input:checked')].map(cb => cb.value);
   const customTopic = $('#custom-topic').value.trim();
-  const apiKey = $('#api-key').value.trim();
   const errEl = $('#error');
   errEl.classList.add('hidden');
 
   const fail = msg => { errEl.textContent = msg; errEl.classList.remove('hidden'); };
 
   if (!topicIds.length && !customTopic) return fail('Choose at least one topic (or enter a custom one).');
-  if (customTopic && !apiKey) return fail('A custom topic needs a Claude API key for the live literature scan. Pick library topics instead, or enter a key.');
 
   $('#generate').disabled = true;
   $('#results').classList.add('hidden');
@@ -65,9 +59,10 @@ async function generate() {
 
   try {
     let topics = TOPICS.filter(t => topicIds.includes(t.id));
+    let customNames = [];
     if (customTopic) {
-      localStorage.setItem('anthropic_api_key', apiKey);
-      const custom = await scanLiterature(customTopic, apiKey);
+      const custom = await scanLiterature(customTopic);
+      customNames = custom.map(t => t.name);
       topics = topics.concat(custom);
     }
     PKG = generatePackage({
@@ -76,7 +71,10 @@ async function generate() {
       company: $('#company').value.trim(),
       audience: $('#audience').value.trim()
     });
-    PKG.source = customTopic ? 'live-scan+library' : 'curated-library';
+    PKG.source = customTopic ? 'web-scan+library' : 'curated-library';
+    if (customNames.length) {
+      PKG.warnings.push(`Sources for "${customNames.join('", "')}" were gathered by an automated scan of Google Books, Crossref, Open Library and Wikipedia — review them before presenting to a client.`);
+    }
     render(PKG);
   } catch (e) {
     fail(e.message);
@@ -86,54 +84,192 @@ async function generate() {
   }
 }
 
-// Live literature scan for custom topics: asks Claude to synthesize a topic
-// entry (sources, models, exercises) in the same shape as the curated library.
-async function scanLiterature(customTopic, apiKey) {
-  const schemaHint = `{
-  "id": "kebab-case-id",
-  "name": "Topic Name",
-  "domain": "Managerial Skills | Communication | Personal Development",
-  "blurb": "one sentence",
-  "learningOutcomes": ["3-4 items"],
-  "literature": [{"title":"","authors":"","year":2020,"keyIdeas":["2 items"]}],
-  "coreModels": [{"name":"","summary":"","teachPoints":["3-4 items"]}],
-  "exercises": [{"name":"","duration":25,"type":"pairs","description":"","debrief":""}]
-}`;
-  const prompt = `You are a learning & development research assistant scanning management literature.
+// Keyless live literature scan for custom topics. Queries public scholarly
+// sources directly from the browser — all CORS-enabled, no account or key:
+//   Google Books + Open Library  → books (descriptions + popularity signal)
+//   Crossref                     → peer-reviewed articles (citation counts)
+//   Wikipedia                    → topic overview
+// Results are assembled into the same topic shape as the curated library.
+async function scanLiterature(customTopic) {
+  const q = encodeURIComponent(customTopic);
+  const getJson = url => fetch(url).then(r => { if (!r.ok) throw new Error(`HTTP ${r.status}`); return r.json(); });
 
-Create a complete training-topic entry for: "${customTopic}".
-Ground it in 3-4 real, citable published sources (books, HBR articles, peer-reviewed research) — do not invent sources. Include 2-3 teachable core models and 2-3 practical workshop exercises (20-35 min each) that use participants' real cases.
+  const [gb, cr, ol, wiki] = await Promise.allSettled([
+    getJson(`https://www.googleapis.com/books/v1/volumes?q=${q}&maxResults=12&printType=books&langRestrict=en&orderBy=relevance`),
+    getJson(`https://api.crossref.org/works?query=${q}&rows=12&filter=type:journal-article&select=title,author,issued,is-referenced-by-count,container-title`),
+    getJson(`https://openlibrary.org/search.json?q=${q}&limit=12&fields=title,author_name,first_publish_year,edition_count`),
+    wikipediaOverview(customTopic)
+  ]);
 
-Return ONLY a JSON array with one topic object matching this shape (no markdown, no commentary):
-${schemaHint}`;
-
-  const resp = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true'
-    },
-    body: JSON.stringify({
-      model: 'claude-fable-5',
-      max_tokens: 8000,
-      messages: [{ role: 'user', content: prompt }]
-    })
-  });
-  if (!resp.ok) {
-    const body = await resp.text();
-    throw new Error(`Literature scan failed (API ${resp.status}): ${body.slice(0, 200)}`);
+  // Books: Google Books carries descriptions; Open Library edition counts
+  // act as a popularity signal for ranking when both know the title.
+  const editionCount = {};
+  if (ol.status === 'fulfilled') for (const d of (ol.value.docs || [])) {
+    if (d.title) editionCount[d.title.toLowerCase()] = d.edition_count || 0;
   }
-  const data = await resp.json();
-  const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
-  const jsonText = text.replace(/^```(json)?/m, '').replace(/```\s*$/m, '').trim();
-  const arr = JSON.parse(jsonText);
-  const valid = (Array.isArray(arr) ? arr : [arr]).filter(t =>
-    t && t.name && Array.isArray(t.literature) && Array.isArray(t.coreModels) && t.coreModels.length &&
-    Array.isArray(t.exercises) && t.exercises.length && Array.isArray(t.learningOutcomes));
-  if (!valid.length) throw new Error('Literature scan returned an unusable result — try rephrasing the topic.');
-  return valid;
+
+  const books = [];
+  if (gb.status === 'fulfilled') {
+    const seen = new Set();
+    const items = (gb.value.items || [])
+      .map(i => i.volumeInfo)
+      .filter(v => v && v.title && v.authors && v.description && v.description.length > 80)
+      .sort((a, b) => (editionCount[b.title.toLowerCase()] || 0) - (editionCount[a.title.toLowerCase()] || 0));
+    for (const v of items) {
+      const key = v.title.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const sentences = v.description.replace(/\s+/g, ' ').match(/[^.!?]+[.!?]/g) || [v.description];
+      books.push({
+        title: v.title + (v.subtitle ? ': ' + v.subtitle : ''),
+        authors: v.authors.join(' & '),
+        year: parseInt(v.publishedDate, 10) || '',
+        keyIdeas: sentences.slice(0, 2).map(s => s.trim().slice(0, 220))
+      });
+      if (books.length === 2) break;
+    }
+  }
+
+  // Fallback book source: Open Library (no descriptions, but reliable and
+  // keyless) — used when Google Books is rate-limited or returns nothing.
+  // Specific phrasings ("X for remote teams") often match no book titles,
+  // so retry with the core phrase before for/in/with/of.
+  if (books.length < 2 && ol.status === 'fulfilled') {
+    let olDocs = ol.value.docs || [];
+    if (!olDocs.length) {
+      const core = customTopic.split(/\s+(?:for|in|with|of|at)\s+/i)[0];
+      if (core && core !== customTopic) {
+        olDocs = await getJson(`https://openlibrary.org/search.json?q=${encodeURIComponent(core)}&limit=12&fields=title,author_name,first_publish_year,edition_count`)
+          .then(r => r.docs || []).catch(() => []);
+      }
+    }
+    const taken = new Set(books.map(b => b.title.toLowerCase()));
+    const docs = olDocs
+      .filter(d => d.title && d.author_name && d.first_publish_year && (d.edition_count || 0) >= 2)
+      .sort((a, b) => (b.edition_count || 0) - (a.edition_count || 0));
+    for (const d of docs) {
+      const key = d.title.toLowerCase();
+      if (taken.has(key)) continue;
+      taken.add(key);
+      // OL lists name variants of the same author ("William B. Gudykunst",
+      // "William Gudykunst") — dedupe on last name + first initial.
+      const seenAuthors = new Set();
+      const authors = d.author_name.filter(n => {
+        const k = (n.trim().split(/\s+/).pop() + '|' + n.trim()[0]).toLowerCase();
+        if (seenAuthors.has(k)) return false;
+        seenAuthors.add(k);
+        return true;
+      });
+      books.push({
+        title: d.title,
+        authors: authors.slice(0, 3).join(' & '),
+        year: d.first_publish_year,
+        keyIdeas: [`Published book (${d.edition_count} editions) surfaced by the live literature scan — review the full text before citing`]
+      });
+      if (books.length === 2) break;
+    }
+  }
+
+  const papers = [];
+  if (cr.status === 'fulfilled') {
+    const items = ((cr.value.message || {}).items || [])
+      .filter(w => w.title && w.title[0] && w.author && w.author.length)
+      .sort((a, b) => (b['is-referenced-by-count'] || 0) - (a['is-referenced-by-count'] || 0));
+    for (const w of items.slice(0, 2)) {
+      const names = w.author.slice(0, 3).map(a => [a.given, a.family].filter(Boolean).join(' ')).join(', ')
+        + (w.author.length > 3 ? ' et al.' : '');
+      const journal = (w['container-title'] && w['container-title'][0]) || '';
+      papers.push({
+        title: w.title[0],
+        authors: names,
+        year: (w.issued && w.issued['date-parts'] && w.issued['date-parts'][0][0]) || '',
+        keyIdeas: [`Peer-reviewed article${journal ? ' in ' + journal : ''}, cited ${w['is-referenced-by-count'] || 0} times`]
+      });
+    }
+  }
+
+  const literature = books.concat(papers);
+  if (!literature.length) {
+    throw new Error('The live scan found no usable sources for this topic — try a broader or differently-worded topic, or check your internet connection.');
+  }
+
+  const overview = wiki.status === 'fulfilled' ? wiki.value : null;
+  const name = customTopic.charAt(0).toUpperCase() + customTopic.slice(1);
+  const nameLc = customTopic.toLowerCase();
+  const domain = /manag|leader|delegat|team|decision|perform|strateg/.test(nameLc) ? 'Managerial Skills'
+    : /communicat|present|negotiat|conflict|feedback|conversation|listen|influen/.test(nameLc) ? 'Communication'
+    : 'Personal Development';
+
+  return [{
+    id: 'custom-' + nameLc.replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40),
+    name,
+    domain,
+    blurb: overview && overview.extract
+      ? overview.extract.replace(/\s+/g, ' ').split('. ')[0].slice(0, 200) + '.'
+      : `Evidence-based working session on ${nameLc}, built from a live scan of published sources.`,
+    learningOutcomes: [
+      `Explain the strongest published findings on ${nameLc} and their workplace implications`,
+      'Diagnose current practice against the frameworks from the literature',
+      'Apply at least one evidence-based technique to a real, current case',
+      'Commit to a specific behaviour change with a measure and a follow-up date'
+    ],
+    literature,
+    coreModels: [
+      {
+        name: `What the literature says about ${nameLc}`,
+        summary: overview && overview.extract
+          ? overview.extract.replace(/\s+/g, ' ').slice(0, 280)
+          : `Survey of the strongest published sources on ${nameLc} surfaced by the live scan.`,
+        teachPoints: literature.slice(0, 4).map(l =>
+          `${l.authors}${l.year ? ' (' + l.year + ')' : ''} — ${l.title}: ${l.keyIdeas[0]}`)
+      },
+      {
+        name: 'From insight to behaviour',
+        summary: `Translate the published evidence on ${nameLc} into workplace behaviour: diagnose the current situation, select a technique from the sources, rehearse it on a real case.`,
+        teachPoints: [
+          'Diagnose: where does this topic cost the team time, quality or trust today?',
+          'Select: which finding from the sources addresses that specific cost?',
+          'Rehearse: practise the technique on a real case before using it live',
+          'Review: agree what evidence would show the new behaviour is working'
+        ]
+      }
+    ],
+    exercises: [
+      {
+        name: 'Real-case mapping', duration: 25, type: 'individual + pairs',
+        description: `Participants describe one real, current situation involving ${nameLc} and map it against the findings presented: what does the literature predict, and what would "good" look like here?`,
+        debrief: 'Collect the most common patterns on a flipchart; connect each to a source.'
+      },
+      {
+        name: 'Technique practice rounds', duration: 30, type: 'trios',
+        description: 'Each participant picks one technique from the input session and rehearses it on their real case; the observer notes where it held up and where it broke down. Rotate roles.',
+        debrief: 'Each trio reports one thing that worked and one adaptation they had to make.'
+      },
+      {
+        name: 'Action planning', duration: 20, type: 'individual + pairs',
+        description: 'Participants commit to one specific behaviour change, a date, and a measure; pairs pressure-test feasibility.',
+        debrief: 'Commitments exchanged with an accountability partner for the 30-day follow-up.'
+      }
+    ]
+  }];
+}
+
+async function wikipediaOverview(topic) {
+  // Try the full phrase first; specific topics ("X for remote teams") often
+  // have no page, so retry with the core phrase before for/in/with/of.
+  const candidates = [topic];
+  const core = topic.split(/\s+(?:for|in|with|of|at)\s+/i)[0];
+  if (core && core !== topic) candidates.push(core);
+  for (const c of candidates) {
+    const os = await fetch(`https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(c)}&limit=1&format=json&origin=*`)
+      .then(r => r.json()).catch(() => null);
+    const title = os && os[1] && os[1][0];
+    if (!title) continue;
+    const s = await fetch(`https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title)}`)
+      .then(r => r.json()).catch(() => null);
+    if (s && s.extract && s.type !== 'disambiguation') return { title: s.title, extract: s.extract };
+  }
+  return null;
 }
 
 function render(pkg) {
@@ -142,7 +278,7 @@ function render(pkg) {
     pkg.meta.durationLabel,
     pkg.meta.company && `for ${pkg.meta.company}`,
     pkg.meta.audience && `audience: ${pkg.meta.audience}`,
-    pkg.source === 'curated-library' ? 'evidence: curated literature library' : 'evidence: live literature scan + library'
+    pkg.source === 'curated-library' ? 'evidence: curated literature library' : 'evidence: live web scan (Google Books, Crossref, Open Library, Wikipedia) + library'
   ].filter(Boolean).join(' · ');
 
   const warnEl = $('#pkg-warnings');

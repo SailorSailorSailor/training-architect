@@ -38,9 +38,15 @@ then open http://localhost:8123
    - **Print current tab** — print/PDF the schedule, materials, or management brief
    - **Download package (JSON)** — full structured package for reuse
 
-## Custom topics (live literature scan)
+## Custom topics (live literature scan — no key needed)
 
-Topics not in the library (e.g. "Intercultural communication for remote teams") can be generated through a live Claude API literature scan: enter the topic and a Claude API key (console.anthropic.com). The key is stored only in your browser's localStorage and sent only to api.anthropic.com.
+Topics not in the library (e.g. "Intercultural communication for remote teams") are generated through a live scan of public scholarly sources, directly from the browser with no account or API key:
+
+- **Google Books** and **Open Library** — books (popularity-ranked, with descriptions where available)
+- **Crossref** — peer-reviewed articles, ranked by citation count
+- **Wikipedia** — topic overview for the framing slide
+
+The scan finds real, citable sources; the module structure for custom topics uses a generic evidence → practice → action-planning design. The app flags custom-topic packages with a reminder to review the sources before client use.
 
 ## Files
 
