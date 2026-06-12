@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Training Architect — Lux Nova Training</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <h1>Training Architect</h1>
+    <p class="tagline">Literature-grounded training packages: schedule, deck, materials, and a management brief — ready for approval.</p>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <section id="builder" class="card">
+    <h2>1 · Choose topics</h2>
+    <p class="hint">Pick one or more. One topic per module slot — a half-day fits 2 modules, a full day 4, two days 8.</p>
+    <div id="topic-groups"></div>
+
+    <div class="custom-topic">
+      <label for="custom-topic">Custom topic <span class="optional">(not in the library — uses a live literature scan via the Claude API)</span></label>
+      <input type="text" id="custom-topic" placeholder="e.g. Intercultural communication for remote teams">
+      <label for="api-key" style="margin-top:8px">Claude API key <span class="optional">(only needed for custom topics; stored in your browser only)</span></label>
+      <input type="text" id="api-key" placeholder="sk-ant-…" autocomplete="off">
+    </div>
+
+    <h2>2 · Duration</h2>
+    <div id="durations" class="duration-row"></div>
+
+    <h2>3 · Context <span class="optional">(optional)</span></h2>
+    <div class="context-row">
+      <div>
+        <label for="company">Company</label>
+        <input type="text" id="company" placeholder="e.g. Acme S.A.">
+      </div>
+      <div>
+        <label for="audience">Audience</label>
+        <input type="text" id="audience" placeholder="e.g. first-line managers, 8–12 people">
+      </div>
+    </div>
+
+    <button id="generate">Generate training package</button>
+    <p id="error" class="error hidden"></p>
+  </section>
+
+  <section id="results" class="hidden">
+    <div class="results-head card">
+      <h2 id="pkg-title"></h2>
+      <p id="pkg-meta"></p>
+      <p id="pkg-warnings" class="warning hidden"></p>
+      <div class="actions">
+        <button data-export="deck">Download slide deck (HTML)</button>
+        <button data-export="print">Print current tab</button>
+        <button data-export="json">Download package (JSON)</button>
+      </div>
+    </div>
+
+    <nav class="tabs">
+      <button class="tab active" data-tab="schedule">Schedule</button>
+      <button class="tab" data-tab="deck">Slide deck</button>
+      <button class="tab" data-tab="materials">Materials</button>
+      <button class="tab" data-tab="brief">Management brief</button>
+    </nav>
+
+    <div id="tab-schedule" class="tab-panel card"></div>
+    <div id="tab-deck" class="tab-panel card hidden"></div>
+    <div id="tab-materials" class="tab-panel card hidden"></div>
+    <div id="tab-brief" class="tab-panel card hidden"></div>
+  </section>
+
+  <div id="loading" class="hidden">
+    <div class="spinner"></div>
+    <p>Scanning literature and assembling the package…</p>
+  </div>
+
+</main>
+
+<footer class="wrap">
+  <p>Lux Nova Training · Training Architect</p>
+</footer>
+
+<script src="literature.js"></script>
+<script src="generator.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
